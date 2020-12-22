@@ -1,130 +1,133 @@
 package com.zhehekeji.queue;
 
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 
-/**
- * Created by willtony on 16/7/21.
- */
+
 public class BatchQueue<T> {
+    private static final String TAG = "BatchQueue";
+    /**
+     * 默认间隔处理队列时间，ms
+     */
+    private static final int DEFAULT_TIME = 5000;
+    /**
+     * 默认队列处理长度
+     */
+    private static final int DEFAULT_COUNT = 200;
 
-    private Logger logger = LoggerFactory.getLogger(BatchQueue.class);
+    private final long mIntervalTime;
+    private final int mHandleLength;
+    private final QueueProcess<T> mQueueProcess;
+    private final BlockingQueue<T> mQueue = new ArrayBlockingQueue<>(5000);
+    private List<T> mDataList;
 
-    // 默认间隔处理队列时间
-    private static int DEFAULT_TIME = 5000;
-
-    // 默认队列处理长度
-    private static int DEFAULT_COUNT = 2000;
-
-    // 设置队列处理时间
-    private long intervalTime;
-
-    // 设置队列处理长度
-    private int handleLength;
-
-    // 阻塞队列
-    ArrayBlockingQueue<T> queue = new ArrayBlockingQueue<T>(20000);
-
-    // 回调接口
-    private QueueProcess<T> process;
-
-    // 用来存放从队列拿出的数据
-    private List<T> dataList;
-
-    // 往队列添加数据
-    public void add(T t){
-        queue.offer(t);
-    }
-
-    // 清理生成的list
-    public void clearList(){
-        dataList = null;
-        dataList = new ArrayList<T>();
-    }
+    private static final int TIMEOUT = 100;
+    private Thread mThread;
+    private volatile boolean mIsStart = false;
 
     /**
      * 设置默认的队列处理时间和数量
-     * @param process
+     *
+     * @param process the process
      */
-    public BatchQueue(QueueProcess<T> process){
+    public BatchQueue(QueueProcess<T> process) {
         this(DEFAULT_TIME, DEFAULT_COUNT, process);
     }
 
     /**
      * 可以设置队列的处理的间隔时间和处理长度
-     * @param intervalTime
-     * @param handleQueueLength
-     * @param process
+     *
+     * @param intervalTime      the interval time
+     * @param handleQueueLength the handle queue length
+     * @param process           the process
      */
-    public BatchQueue(int intervalTime, int handleQueueLength, QueueProcess<T> process){
-        this.process = process;
-        this.intervalTime = intervalTime;
-        this.handleLength = handleQueueLength;
-        start();
+    public BatchQueue(int intervalTime, int handleQueueLength, QueueProcess<T> process) {
+        mQueueProcess = Optional.of(process).get();
+        mIntervalTime = intervalTime;
+        mHandleLength = handleQueueLength;
+        mDataList = new ArrayList<>(mHandleLength);
     }
 
-    private void  start(){
-        dataList = new ArrayList<T>(handleLength);
-        DataListener listener = new  DataListener();
-        new Thread(listener).start();
+    public void add(T t) {
+        if (mIsStart && t != null) {
+            try {
+                mQueue.put(t);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
     }
 
-    // 队列监听，当队列达到一定数量和时间后处理队列
-    class DataListener implements Runnable{
 
+    public synchronized void destroy() {
+        if (mThread != null) {
+            mThread.interrupt();
+        }
+        mIsStart = false;
+        mQueue.clear();
+    }
+
+    public synchronized void start() {
+        if (!mIsStart) {
+            mThread = new Thread(new MainLoop(), TAG);
+            mThread.start();
+            mIsStart = true;
+        }
+    }
+
+    /**
+     * The interface Queue process.
+     *
+     * @param <T> the type parameter
+     */
+    public interface QueueProcess<T> {
+        /**
+         * Process data.
+         *
+         * @param list the list
+         */
+        void processData(List<T> list);
+    }
+
+    private class MainLoop implements Runnable {
         @Override
         public void run() {
-
             long startTime = System.currentTimeMillis();
-            T t = null;
-            while(true){
+            while (mIsStart) {
                 try {
-                    // 从队列拿出队列头部的元素
-                    t = queue.poll();
-                    if(null != t){
-                        dataList.add(t);
+                    T t = mQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
+                    if (null != t) {
+                        mDataList.add(t);
                     }
-
-                    if(dataList.size() >= handleLength){
-                        logger.debug("list size: " + dataList.size());
-                        startTime = callBack(dataList);
+                    if (mDataList.size() >= mHandleLength) {
+                        startTime = callBack(mDataList);
                         continue;
                     }
-
-                    long currentTime = System.currentTimeMillis();
-                    if(currentTime - startTime > intervalTime && dataList.size() > 0){
-                        logger.debug("currentTime - startTime " + (currentTime - startTime) + " intervalTime==>" + intervalTime);
-                        startTime = callBack(dataList);
-                        continue;
+                    if (System.currentTimeMillis() - startTime > mIntervalTime
+                            && mDataList.size() > 0) {
+                        startTime = callBack(mDataList);
                     }
-                } catch (Exception e) {
-                    logger.error(e.getMessage(), e);
-                    e.printStackTrace();
+                } catch (InterruptedException ignored) {
+
                 }
-
             }
+            mQueue.clear();
         }
 
         private long callBack(List<T> dataList) {
-
-            // 处理队列
-            try{
-                process.processData(dataList);
-            }catch(Exception e){
+            try {
+                mQueueProcess.processData(dataList);
+            } catch (Exception e) {
                 e.printStackTrace();
-            }finally{
-                // 清理掉dataList中的元素
-                clearList();
+            } finally {
+                mDataList = new ArrayList<>(mHandleLength);
             }
-
-
             return System.currentTimeMillis();
         }
-
     }
 }
